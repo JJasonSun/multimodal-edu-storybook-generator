@@ -193,16 +193,7 @@ def generate_story(api_key, concept):
 
     content = response.json()["choices"][0]["message"]["content"]
 
-    # 尝试解析 JSON
-    try:
-        data = json.loads(content)
-    except json.JSONDecodeError:
-        # Fallback: 用正则提取 JSON 块
-        match = re.search(r'\{[\s\S]*\}', content)
-        if match:
-            data = json.loads(match.group())
-        else:
-            raise ValueError("无法从模型响应中解析出有效的 JSON 数据")
+    data = _parse_json_robust(content)
 
     # 验证结构
     if "title" not in data or "pages" not in data:
@@ -211,6 +202,34 @@ def generate_story(api_key, concept):
         raise ValueError(f"期望3页内容，实际得到{len(data['pages'])}页")
 
     return data
+
+
+def _parse_json_robust(text):
+    """健壮的 JSON 解析：处理 markdown 包裹、尾逗号等常见问题"""
+    # 1. 去除 markdown 代码块
+    text = re.sub(r'```(?:json)?\s*', '', text)
+    text = re.sub(r'```\s*', '', text)
+    text = text.strip()
+
+    # 2. 尝试直接解析
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # 3. 提取最外层 { ... }
+    match = re.search(r'\{[\s\S]*\}', text)
+    if match:
+        raw = match.group()
+        # 4. 修复尾逗号：,} → }，,] → ]
+        raw = re.sub(r',\s*}', '}', raw)
+        raw = re.sub(r',\s*]', ']', raw)
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            pass
+
+    raise ValueError(f"无法解析 JSON，原始内容前200字符：{text[:200]}")
 
 
 def generate_image(api_key, prompt, save_path):
