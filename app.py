@@ -25,13 +25,13 @@ load_dotenv()
 # ============================================================
 # 配置常量
 # ============================================================
-API_BASE_URL = "https://chat.ecnu.edu.cn/open/api/v1"
+API_BASE_URL = os.environ.get("ECNU_API_BASE", "https://chat.ecnu.edu.cn/open/api/v1")
 DEFAULT_API_KEY = os.environ.get("ECNU_API_KEY", "")
 
-MODEL_TEXT = "ecnu-plus"                # 文本生成模型
-MODEL_IMAGE = "ecnu-image"             # 图像生成模型
-MODEL_TTS = "ecnu-tts"                 # 文本转语音模型
-MODEL_EMBEDDING = "ecnu-embedding-small"  # 文本嵌入模型
+MODEL_TEXT = os.environ.get("ECNU_MODEL_TEXT", "ecnu-plus")
+MODEL_IMAGE = os.environ.get("ECNU_MODEL_IMAGE", "ecnu-image")
+MODEL_TTS = os.environ.get("ECNU_MODEL_TTS", "ecnu-tts")
+MODEL_EMBEDDING = os.environ.get("ECNU_MODEL_EMBEDDING", "ecnu-embedding-small")
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "education.db")
 IMAGE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "images")
