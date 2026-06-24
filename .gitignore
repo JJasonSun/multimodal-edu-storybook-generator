@@ -9,7 +9,7 @@ build/
 .venv/
 
 # Secrets (NEVER commit)
-.streamlit/secrets.toml
+.env
 
 # Database
 education.db

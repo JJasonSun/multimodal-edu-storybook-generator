@@ -18,6 +18,9 @@ from pathlib import Path
 import numpy as np
 import requests
 import streamlit as st
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ============================================================
 # 配置常量
@@ -881,13 +884,11 @@ def main():
     # 侧边栏配置
     with st.sidebar:
         st.header("⚙️ 系统配置")
-        # 优先级：环境变量 > Streamlit secrets > 用户手动输入
-        default_key = DEFAULT_API_KEY or st.secrets.get("ECNU_API_KEY", "")
         api_key = st.text_input(
             "ECNU API Key",
-            value=default_key,
+            value=DEFAULT_API_KEY,
             type="password",
-            help="在 chat.ecnu.edu.cn 获取 API Key，或设置环境变量 ECNU_API_KEY"
+            help="在 chat.ecnu.edu.cn 获取 API Key，或在 .env 文件中设置 ECNU_API_KEY"
         )
         st.markdown("---")
         st.markdown("### 📊 系统信息")
