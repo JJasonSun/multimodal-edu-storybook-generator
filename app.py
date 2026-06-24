@@ -662,10 +662,10 @@ def tab_creation_center(api_key):
 
                 pages_data[i]["audio_path"] = audio_path
 
-            # ---- Step 4: 持久化存储 ----
+            # ---- Step 5: 持久化存储 ----
             st.write("💾 正在保存到数据库...")
             try:
-                book_id = save_book(concept.strip(), title, pages_data)
+                book_id = save_book(concept.strip(), title, pages_data, tags=tags, embedding=embedding)
                 st.write(f"✅ 保存完成（绘本 ID: {book_id}）")
             except Exception as e:
                 status.update(label="保存失败", state="error")
@@ -674,9 +674,25 @@ def tab_creation_center(api_key):
 
             status.update(label="生成完成！", state="complete")
 
+            # ---- Step 4: 向量嵌入 ----
+            st.write("🧮 正在生成文本向量...")
+            all_text = " ".join(p["page_text"] for p in pages)
+            embedding = None
+            try:
+                embedding = generate_embedding(api_key, all_text)
+                st.write("✅ 向量嵌入完成")
+            except Exception as e:
+                st.warning(f"向量嵌入失败（不影响绘本生成）: {e}")
+
         # ---- 展示生成的绘本 ----
         st.markdown("---")
         st.markdown(f"## 🎉 {title}")
+
+        # 展示标签
+        tags = story.get("tags", [])
+        if tags:
+            tag_str = " ".join(f"`{t}`" for t in tags)
+            st.markdown(f"**标签：** {tag_str}")
 
         cols = st.columns(3)
         for i in range(3):
@@ -692,8 +708,57 @@ def tab_library(api_key):
         st.info("📭 绘本馆暂无藏书，请先在「智能绘本创作中心」生成第一本绘本！")
         return
 
+    # ---- 搜索与筛选区 ----
+    col_search, col_tag = st.columns([2, 1])
+
+    with col_search:
+        search_query = st.text_input(
+            "🔍 语义搜索",
+            placeholder="输入自然语言描述，如：关于太阳系的故事",
+            label_visibility="collapsed",
+        )
+
+    with col_tag:
+        all_tags = get_all_tags()
+        selected_tag = st.selectbox(
+            "🏷️ 按标签筛选",
+            options=["全部标签"] + all_tags,
+            label_visibility="collapsed",
+        ) if all_tags else "全部标签"
+
+    # ---- 搜索逻辑 ----
+    filtered_books = None
+    if search_query.strip() and api_key:
+        with st.spinner("正在语义检索..."):
+            try:
+                results = search_books_by_vector(api_key, search_query.strip())
+                if results:
+                    book_ids = [r[0] for r in results]
+                    filtered_books = []
+                    for bid in book_ids:
+                        info = get_book_info(bid)
+                        if info:
+                            filtered_books.append(info)
+                    st.caption(f"找到 {len(filtered_books)} 本相关绘本")
+                else:
+                    st.info("未找到相关绘本")
+                    filtered_books = []
+            except Exception as e:
+                st.warning(f"语义检索失败: {e}，回退到列表模式")
+
+    elif selected_tag != "全部标签":
+        filtered_books = search_books_by_tag(selected_tag)
+        st.caption(f"标签「{selected_tag}」下有 {len(filtered_books)} 本绘本")
+
+    # 确定展示列表
+    display_books = filtered_books if filtered_books is not None else books
+
+    if not display_books:
+        st.info("📭 没有匹配的绘本")
+        return
+
     # 绘本选择
-    book_options = {f"{b['title']}（{b['concept']}）— {b['created_at']}": b['id'] for b in books}
+    book_options = {f"{b['title']}（{b['concept']}）— {b['created_at']}": b['id'] for b in display_books}
     selected_label = st.selectbox("选择一本绘本", options=list(book_options.keys()))
 
     if not selected_label:
@@ -709,7 +774,16 @@ def tab_library(api_key):
 
     # 绘本信息
     st.markdown(f"## 📖 {book_info['title']}")
+    tags_str = ""
+    if book_info.get("tags"):
+        try:
+            tags = json.loads(book_info["tags"])
+            tags_str = "　".join(f"`{t}`" for t in tags)
+        except (json.JSONDecodeError, TypeError):
+            pass
     st.caption(f"科学概念：{book_info['concept']}　|　创建时间：{book_info['created_at']}")
+    if tags_str:
+        st.markdown(f"**标签：** {tags_str}")
 
     st.markdown("---")
 
@@ -730,6 +804,49 @@ def tab_library(api_key):
                 st.rerun()
             except Exception as e:
                 st.error(f"删除失败: {e}")
+
+
+def tab_analytics():
+    """Tab 3: 数据分析中心"""
+    stats = get_analytics_data()
+
+    if stats["total_books"] == 0:
+        st.info("📭 暂无数据，请先生成一些绘本！")
+        return
+
+    # 核心指标
+    st.markdown("#### 📊 系统概览")
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("绘本总数", stats["total_books"])
+    col2.metric("页面总数", stats["total_pages"])
+    col3.metric("插画资源", stats["total_images"])
+    col4.metric("音频资源", stats["total_audios"])
+
+    st.markdown("---")
+
+    # 资源占用
+    col_res1, col_res2 = st.columns(2)
+    with col_res1:
+        st.metric("插画存储", f"{stats['image_size_mb']} MB")
+    with col_res2:
+        st.metric("音频存储", f"{stats['audio_size_mb']} MB")
+
+    st.markdown("---")
+
+    # 概念分布
+    if stats["concept_distribution"]:
+        st.markdown("#### 📚 概念分类分布")
+        st.bar_chart(stats["concept_distribution"])
+
+    # 生成趋势
+    if stats["daily_trend"]:
+        st.markdown("#### 📈 生成趋势")
+        st.line_chart(stats["daily_trend"])
+
+    # 标签频率
+    if stats["tag_frequency"]:
+        st.markdown("#### 🏷️ 标签频率 Top 15")
+        st.bar_chart(stats["tag_frequency"])
 
 
 def _parse_api_error(error):
@@ -786,13 +903,16 @@ def main():
             pass
 
     # 主界面标签页
-    tab1, tab2 = st.tabs(["🎨 智能绘本创作中心", "📚 数字多模态绘本馆"])
+    tab1, tab2, tab3 = st.tabs(["🎨 智能绘本创作中心", "📚 数字多模态绘本馆", "📊 数据分析中心"])
 
     with tab1:
         tab_creation_center(api_key)
 
     with tab2:
         tab_library(api_key)
+
+    with tab3:
+        tab_analytics()
 
 
 if __name__ == "__main__":
