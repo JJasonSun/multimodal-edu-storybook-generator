@@ -618,6 +618,7 @@ def tab_creation_center(api_key):
             title = story["title"]
             pages = story["pages"]
             st.write(f"✅ 剧本完成：**{title}**")
+            tags = story.get("tags", [])
 
             # ---- Step 2: 插画生成 ----
             for i in range(3):
@@ -665,6 +666,16 @@ def tab_creation_center(api_key):
 
                 pages_data[i]["audio_path"] = audio_path
 
+            # ---- Step 4: 向量嵌入 ----
+            st.write("🧮 正在生成文本向量...")
+            all_text = " ".join(p["page_text"] for p in pages)
+            embedding = None
+            try:
+                embedding = generate_embedding(api_key, all_text)
+                st.write("✅ 向量嵌入完成")
+            except Exception as e:
+                st.warning(f"向量嵌入失败（不影响绘本生成）: {e}")
+
             # ---- Step 5: 持久化存储 ----
             st.write("💾 正在保存到数据库...")
             try:
@@ -677,22 +688,11 @@ def tab_creation_center(api_key):
 
             status.update(label="生成完成！", state="complete")
 
-            # ---- Step 4: 向量嵌入 ----
-            st.write("🧮 正在生成文本向量...")
-            all_text = " ".join(p["page_text"] for p in pages)
-            embedding = None
-            try:
-                embedding = generate_embedding(api_key, all_text)
-                st.write("✅ 向量嵌入完成")
-            except Exception as e:
-                st.warning(f"向量嵌入失败（不影响绘本生成）: {e}")
-
         # ---- 展示生成的绘本 ----
         st.markdown("---")
         st.markdown(f"## 🎉 {title}")
 
         # 展示标签
-        tags = story.get("tags", [])
         if tags:
             tag_str = " ".join(f"`{t}`" for t in tags)
             st.markdown(f"**标签：** {tag_str}")
