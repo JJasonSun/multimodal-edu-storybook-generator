@@ -193,7 +193,11 @@ def generate_story(api_key, concept):
 
     content = response.json()["choices"][0]["message"]["content"]
 
-    data = _parse_json_robust(content)
+    try:
+        data = _parse_json_robust(content)
+    except ValueError:
+        st.error(f"模型返回的原始内容：\n\n{content[:1000]}")
+        raise
 
     # 验证结构
     if "title" not in data or "pages" not in data:
