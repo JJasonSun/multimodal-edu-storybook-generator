@@ -173,7 +173,7 @@ def generate_story(api_key, concept):
                         "items": {"type": "string"}
                     }
                 },
-                "required": ["title", "pages", "tags"]
+                "required": ["title", "pages"]
             }
         }
     }
@@ -204,6 +204,8 @@ def generate_story(api_key, concept):
         raise ValueError("返回数据缺少 title 或 pages 字段")
     if len(data["pages"]) < 3:
         raise ValueError(f"期望3页内容，实际得到{len(data['pages'])}页")
+    if "tags" not in data:
+        data["tags"] = []
 
     return data
 
