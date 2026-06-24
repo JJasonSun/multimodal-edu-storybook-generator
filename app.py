@@ -889,6 +889,45 @@ def _parse_api_error(error):
         return str(error)
 
 
+def _check_model(api_key, model):
+    """检测单个模型是否可用，返回 (状态, 延迟ms)"""
+    url = f"{API_BASE_URL}/chat/completions"
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 1,
+    }
+    try:
+        start = time.time()
+        resp = requests.post(url, headers=get_headers(api_key), json=payload, timeout=15)
+        latency = int((time.time() - start) * 1000)
+        if resp.status_code == 200:
+            return "online", latency
+        return f"error({resp.status_code})", latency
+    except requests.exceptions.Timeout:
+        return "timeout", 0
+    except Exception as e:
+        return "offline", 0
+
+
+def _render_health_check(api_key):
+    """渲染所有模型的健康状态"""
+    models = [
+        (MODEL_TEXT, "文本生成"),
+        (MODEL_IMAGE, "图像生成"),
+        (MODEL_TTS, "语音合成"),
+        (MODEL_EMBEDDING, "文本嵌入"),
+    ]
+    for model, label in models:
+        status, latency = _check_model(api_key, model)
+        if status == "online":
+            st.markdown(f":green[●] **{label}** `{model}` — {latency}ms")
+        elif status == "timeout":
+            st.markdown(f":orange[●] **{label}** `{model}` — 超时")
+        else:
+            st.markdown(f":red[●] **{label}** `{model}` — {status}")
+
+
 # ============================================================
 # 主程序入口
 # ============================================================
@@ -913,13 +952,20 @@ def main():
             "ECNU API Key",
             value=DEFAULT_API_KEY,
             type="password",
-            help="在 chat.ecnu.edu.cn 获取 API Key，或在 .env 文件中设置 ECNU_API_KEY"
+            help="在 .env 文件中设置 ECNU_API_KEY，或在此手动输入"
         )
+        st.markdown("---")
+
+        # 模型健康检查
+        st.markdown("### 🩺 模型状态")
+        if api_key:
+            _render_health_check(api_key)
+        else:
+            st.warning("请先配置 API Key")
+
         st.markdown("---")
         st.markdown("### 📊 系统信息")
         st.markdown(f"数据库路径: `{DB_PATH}`")
-        st.markdown(f"图片目录: `{IMAGE_DIR}`")
-        st.markdown(f"音频目录: `{AUDIO_DIR}`")
 
         # 显示绘本总数
         try:

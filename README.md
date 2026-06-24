@@ -24,28 +24,31 @@
 
 ## 核心技术亮点
 
-| 技术方向 | 本系统实现 |
-|---|---|
-| **多模态数据管理** | SQLite 嵌入式关系数据库存储文本、图片路径、音频路径、向量嵌入，实现多模态非结构化数据的结构化管理 |
-| **向量数据库** | 调用 `ecnu-embedding-small` 生成 1024 维文本向量，支持余弦相似度语义检索 |
-| **数据驱动的 AI 系统** | 通过 Prompt Engineering 与结构化输出（JSON Schema），约束 LLM 生成可直接入库的标准化数据 |
-| **数据治理** | LLM 自动提取标签（tags），实现教学资源的自动分类与元数据管理 |
-| **嵌入式数据库** | SQLite 零部署、单文件存储，适合教育场景的轻量化部署需求 |
+| 技术方向                     | 本系统实现                                                                                        |
+| ---------------------------- | ------------------------------------------------------------------------------------------------- |
+| **多模态数据管理**     | SQLite 嵌入式关系数据库存储文本、图片路径、音频路径、向量嵌入，实现多模态非结构化数据的结构化管理 |
+| **向量数据库**         | 调用`ecnu-embedding-small` 生成 1024 维文本向量，支持余弦相似度语义检索                         |
+| **数据驱动的 AI 系统** | 通过 Prompt Engineering 与结构化输出（JSON Schema），约束 LLM 生成可直接入库的标准化数据          |
+| **数据治理**           | LLM 自动提取标签（tags），实现教学资源的自动分类与元数据管理                                      |
+| **嵌入式数据库**       | SQLite 零部署、单文件存储，适合教育场景的轻量化部署需求                                           |
 
 ## 功能模块
 
 ### Tab 1: 智能绘本创作中心
+
 - 输入通识科学概念，一键触发多模态生成流水线
 - 实时展示生成进度（剧本 → 插画 → 配音 → 向量化 → 入库）
 - 生成完成后以卡片布局展示3页绘本（图片 + 文本 + 音频播放器 + 自动标签）
 
 ### Tab 2: 数字多模态绘本馆
+
 - **语义检索**：输入自然语言查询（如"关于动物的故事"），通过向量余弦相似度返回最相关的绘本
 - **标签筛选**：按 LLM 自动提取的标签过滤绘本
 - 浏览历史绘本的完整多模态内容
 - 支持删除操作（级联清除数据库记录与本地文件）
 
 ### Tab 3: 数据分析中心
+
 - 绘本总数、页面总数、资源文件数等核心指标
 - 按概念分类的资源分布统计
 - 按时间维度的生成趋势可视化
@@ -92,49 +95,49 @@ uv run streamlit run app.py
 
 ## 技术栈
 
-| 组件 | 技术 | 说明 |
-|---|---|---|
-| 前端/后端 | Streamlit | Python Web 框架，单文件全栈 |
-| 数据库 | SQLite (sqlite3) | 嵌入式关系型数据库，零安装 |
-| 文本生成 | ecnu-plus (Qwen3.6-27B) | 结构化 JSON 输出，保障数据一致性 |
-| 图像生成 | ecnu-image (Z-Image-Turbo) | 文生图，512×512 卡通风格 |
-| 语音合成 | ecnu-tts (CosyVoice2-0.5B) | 文本转语音，支持多种音色 |
-| 文本嵌入 | ecnu-embedding-small (bge-m3) | 1024 维向量，用于语义检索 |
-| 向量计算 | NumPy | 余弦相似度计算 |
-| 包管理 | uv | 快速 Python 依赖管理 |
-| 版本控制 | Git + GitHub | 代码版本管理 |
+| 组件      | 技术                          | 说明                             |
+| --------- | ----------------------------- | -------------------------------- |
+| 前端/后端 | Streamlit                     | Python Web 框架，单文件全栈      |
+| 数据库    | SQLite (sqlite3)              | 嵌入式关系型数据库，零安装       |
+| 文本生成  | ecnu-plus (Qwen3.6-27B)       | 结构化 JSON 输出，保障数据一致性 |
+| 图像生成  | ecnu-image (Z-Image-Turbo)    | 文生图，512×512 卡通风格        |
+| 语音合成  | ecnu-tts (CosyVoice2-0.5B)    | 文本转语音，支持多种音色         |
+| 文本嵌入  | ecnu-embedding-small (bge-m3) | 1024 维向量，用于语义检索        |
+| 向量计算  | NumPy                         | 余弦相似度计算                   |
+| 包管理    | uv                            | 快速 Python 依赖管理             |
+| 版本控制  | Git + GitHub                  | 代码版本管理                     |
 
 ## 数据库设计
 
 ### storybooks 表（绘本元数据）
 
-| 字段 | 类型 | 说明 |
-|---|---|---|
-| id | INTEGER PK | 自增主键 |
-| title | TEXT | 绘本标题（AI 生成） |
-| concept | TEXT | 用户输入的科学概念 |
-| tags | TEXT | JSON 数组，LLM 自动提取的分类标签 |
-| created_at | TIMESTAMP | 创建时间 |
+| 字段       | 类型       | 说明                              |
+| ---------- | ---------- | --------------------------------- |
+| id         | INTEGER PK | 自增主键                          |
+| title      | TEXT       | 绘本标题（AI 生成）               |
+| concept    | TEXT       | 用户输入的科学概念                |
+| tags       | TEXT       | JSON 数组，LLM 自动提取的分类标签 |
+| created_at | TIMESTAMP  | 创建时间                          |
 
 ### storybook_pages 表（多模态页面详情）
 
-| 字段 | 类型 | 说明 |
-|---|---|---|
-| id | INTEGER PK | 自增主键 |
-| book_id | INTEGER FK | 关联 storybooks(id)，级联删除 |
-| page_number | INTEGER | 页码 (1, 2, 3) |
-| page_text | TEXT | 故事文本内容 |
-| image_path | TEXT | 插画本地存储路径（元数据指针） |
-| audio_path | TEXT | 配音本地存储路径（元数据指针） |
+| 字段        | 类型       | 说明                           |
+| ----------- | ---------- | ------------------------------ |
+| id          | INTEGER PK | 自增主键                       |
+| book_id     | INTEGER FK | 关联 storybooks(id)，级联删除  |
+| page_number | INTEGER    | 页码 (1, 2, 3)                 |
+| page_text   | TEXT       | 故事文本内容                   |
+| image_path  | TEXT       | 插画本地存储路径（元数据指针） |
+| audio_path  | TEXT       | 配音本地存储路径（元数据指针） |
 
 ### storybook_embeddings 表（向量嵌入）
 
-| 字段 | 类型 | 说明 |
-|---|---|---|
-| id | INTEGER PK | 自增主键 |
-| book_id | INTEGER FK | 关联 storybooks(id)，UNIQUE，级联删除 |
-| embedding | BLOB | 1024 维 float 向量的二进制存储 |
-| created_at | TIMESTAMP | 创建时间 |
+| 字段       | 类型       | 说明                                  |
+| ---------- | ---------- | ------------------------------------- |
+| id         | INTEGER PK | 自增主键                              |
+| book_id    | INTEGER FK | 关联 storybooks(id)，UNIQUE，级联删除 |
+| embedding  | BLOB       | 1024 维 float 向量的二进制存储        |
+| created_at | TIMESTAMP  | 创建时间                              |
 
 ## 目录结构
 
@@ -156,13 +159,13 @@ multimodal-edu-storybook-generator/
 
 ## API 用量参考
 
-| 步骤 | 模型 | 预估消耗 |
-|---|---|---|
-| 剧本生成 | ecnu-plus | ~0.4 credits |
-| 插画 ×3 | ecnu-image | 90 credits |
-| 配音 ×3 | ecnu-tts | 15 credits |
-| 向量嵌入 | ecnu-embedding-small | 0.05 credits |
-| **合计** | | **~105.5 credits / 次** |
+| 步骤           | 模型                 | 预估消耗                      |
+| -------------- | -------------------- | ----------------------------- |
+| 剧本生成       | ecnu-plus            | ~0.4 credits                  |
+| 插画 ×3       | ecnu-image           | 90 credits                    |
+| 配音 ×3       | ecnu-tts             | 15 credits                    |
+| 向量嵌入       | ecnu-embedding-small | 0.05 credits                  |
+| **合计** |                      | **~105.5 credits / 次** |
 
 默认配额（5000 credits/天）下约可生成 47 本绘本/天。语义检索每次额外消耗 0.05 credits。
 
