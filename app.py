@@ -573,7 +573,7 @@ def render_page_card(page, index):
         # 显示插画
         image_path = page.get("image_path")
         if image_path and os.path.exists(image_path):
-            st.image(image_path, use_container_width=True)
+            st.image(image_path, width="stretch")
         else:
             st.warning("插画暂未生成")
 
@@ -604,7 +604,7 @@ def tab_creation_center(api_key):
 
     col_btn, _ = st.columns([1, 3])
     with col_btn:
-        generate_clicked = st.button("🚀 一键启动多模态生成", type="primary", use_container_width=True)
+        generate_clicked = st.button("🚀 一键启动多模态生成", type="primary", width="stretch")
 
     if generate_clicked:
         if not concept.strip():
@@ -825,7 +825,7 @@ def tab_library(api_key):
     st.markdown("---")
     col_del, _ = st.columns([1, 3])
     with col_del:
-        if st.button("🗑️ 删除这本绘本", type="secondary", use_container_width=True):
+        if st.button("🗑️ 删除这本绘本", type="secondary", width="stretch"):
             try:
                 delete_book(book_id)
                 st.success("绘本已删除")
