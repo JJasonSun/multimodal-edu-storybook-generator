@@ -889,37 +889,62 @@ def _parse_api_error(error):
         return str(error)
 
 
-def _check_model(api_key, model):
+def _check_model(api_key, model, endpoint="chat"):
     """检测单个模型是否可用，返回 (状态, 延迟ms)"""
-    url = f"{API_BASE_URL}/chat/completions"
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": "hi"}],
-        "max_tokens": 1,
-    }
+    headers = get_headers(api_key)
     try:
         start = time.time()
-        resp = requests.post(url, headers=get_headers(api_key), json=payload, timeout=15)
+        if endpoint == "chat":
+            resp = requests.post(
+                f"{API_BASE_URL}/chat/completions",
+                headers=headers,
+                json={"model": model, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1},
+                timeout=15,
+            )
+        elif endpoint == "image":
+            resp = requests.post(
+                f"{API_BASE_URL}/images/generations",
+                headers=headers,
+                json={"model": model, "prompt": "test", "size": "512x512", "response_format": "url"},
+                timeout=30,
+            )
+        elif endpoint == "tts":
+            resp = requests.post(
+                f"{API_BASE_URL}/audio/speech",
+                headers=headers,
+                json={"model": model, "input": "test", "voice": "xiayu"},
+                timeout=15,
+            )
+        elif endpoint == "embedding":
+            resp = requests.post(
+                f"{API_BASE_URL}/embeddings",
+                headers=headers,
+                json={"model": model, "input": "test"},
+                timeout=15,
+            )
+        else:
+            return "unknown", 0
+
         latency = int((time.time() - start) * 1000)
         if resp.status_code == 200:
             return "online", latency
         return f"error({resp.status_code})", latency
     except requests.exceptions.Timeout:
         return "timeout", 0
-    except Exception as e:
+    except Exception:
         return "offline", 0
 
 
 def _render_health_check(api_key):
     """渲染所有模型的健康状态"""
     models = [
-        (MODEL_TEXT, "文本生成"),
-        (MODEL_IMAGE, "图像生成"),
-        (MODEL_TTS, "语音合成"),
-        (MODEL_EMBEDDING, "文本嵌入"),
+        (MODEL_TEXT, "文本生成", "chat"),
+        (MODEL_IMAGE, "图像生成", "image"),
+        (MODEL_TTS, "语音合成", "tts"),
+        (MODEL_EMBEDDING, "文本嵌入", "embedding"),
     ]
-    for model, label in models:
-        status, latency = _check_model(api_key, model)
+    for model, label, endpoint in models:
+        status, latency = _check_model(api_key, model, endpoint)
         if status == "online":
             st.markdown(f":green[●] **{label}** `{model}` — {latency}ms")
         elif status == "timeout":
@@ -946,14 +971,20 @@ def main():
     init_database()
 
     # 侧边栏配置
+    api_key = DEFAULT_API_KEY
     with st.sidebar:
         st.header("⚙️ 系统配置")
-        api_key = st.text_input(
-            "ECNU API Key",
-            value=DEFAULT_API_KEY,
-            type="password",
-            help="在 .env 文件中设置 ECNU_API_KEY，或在此手动输入"
-        )
+
+        if not api_key:
+            st.error("未检测到 ECNU_API_KEY，请在 `.env` 文件中配置")
+            api_key = st.text_input(
+                "临时输入 API Key",
+                type="password",
+                help="仅本次会话有效，建议写入 .env 文件"
+            )
+        else:
+            st.success("API Key 已从 .env 加载")
+
         st.markdown("---")
 
         # 模型健康检查
