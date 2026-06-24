@@ -9,11 +9,13 @@ import json
 import os
 import re
 import sqlite3
+import struct
 import time
 import uuid
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 import requests
 import streamlit as st
 
@@ -21,11 +23,12 @@ import streamlit as st
 # 配置常量
 # ============================================================
 API_BASE_URL = "https://chat.ecnu.edu.cn/open/api/v1"
-DEFAULT_API_KEY = "sk-3a6d410e57ff48ff8b010d891a95ecc1"
+DEFAULT_API_KEY = os.environ.get("ECNU_API_KEY", "")
 
-MODEL_TEXT = "ecnu-plus"       # 文本生成模型
-MODEL_IMAGE = "ecnu-image"     # 图像生成模型
-MODEL_TTS = "ecnu-tts"         # 文本转语音模型
+MODEL_TEXT = "ecnu-plus"                # 文本生成模型
+MODEL_IMAGE = "ecnu-image"             # 图像生成模型
+MODEL_TTS = "ecnu-tts"                 # 文本转语音模型
+MODEL_EMBEDDING = "ecnu-embedding-small"  # 文本嵌入模型
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "education.db")
 IMAGE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "images")
@@ -56,6 +59,7 @@ def init_database():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 title TEXT NOT NULL,
                 concept TEXT NOT NULL,
+                tags TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
 
@@ -68,8 +72,24 @@ def init_database():
                 audio_path TEXT,
                 FOREIGN KEY (book_id) REFERENCES storybooks(id) ON DELETE CASCADE
             );
+
+            CREATE TABLE IF NOT EXISTS storybook_embeddings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                book_id INTEGER NOT NULL UNIQUE,
+                embedding BLOB NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (book_id) REFERENCES storybooks(id) ON DELETE CASCADE
+            );
         """)
         conn.commit()
+
+        # 兼容旧数据库：为 storybooks 表添加 tags 列（如果不存在）
+        try:
+            conn.execute("ALTER TABLE storybooks ADD COLUMN tags TEXT")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # 列已存在
+
     except sqlite3.Error as e:
         st.error(f"数据库初始化失败: {e}")
     finally:
@@ -103,6 +123,7 @@ def generate_story(api_key, concept):
 3. 要融入科学知识，但用童话的方式表达
 4. 每页需提供一个英文画面描述（image_prompt），用于AI绘图
 5. image_prompt 必须是英文，描述画面细节，风格为 cute cartoon illustration for children
+6. 提供3-5个中文标签（tags），用于分类，如"自然科学"、"动物"、"植物"、"物理"、"天文"等
 
 请严格按照以下JSON格式返回，不要返回其他内容：
 {
@@ -120,7 +141,8 @@ def generate_story(api_key, concept):
       "page_text": "第3页的故事文本",
       "image_prompt": "English prompt for page 3 illustration"
     }
-  ]
+  ],
+  "tags": ["标签1", "标签2", "标签3"]
 }"""
 
     # 结构化输出的 JSON Schema
@@ -142,9 +164,13 @@ def generate_story(api_key, concept):
                             },
                             "required": ["page_text", "image_prompt"]
                         }
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"}
                     }
                 },
-                "required": ["title", "pages"]
+                "required": ["title", "pages", "tags"]
             }
         }
     }
@@ -245,21 +271,54 @@ def generate_audio(api_key, text, save_path):
     return save_path
 
 
+def generate_embedding(api_key, text):
+    """
+    调用 ecnu-embedding-small 生成文本向量
+    返回: numpy array (1024,)
+    """
+    url = f"{API_BASE_URL}/embeddings"
+
+    payload = {
+        "model": MODEL_EMBEDDING,
+        "input": text,
+    }
+
+    response = requests.post(url, headers=get_headers(api_key), json=payload, timeout=60)
+    response.raise_for_status()
+
+    embedding_list = response.json()["data"][0]["embedding"]
+    return np.array(embedding_list, dtype=np.float32)
+
+
+def embedding_to_blob(embedding):
+    """将 numpy 向量转为 BLOB 二进制"""
+    return struct.pack(f'{len(embedding)}f', *embedding.tolist())
+
+
+def blob_to_embedding(blob):
+    """将 BLOB 二进制还原为 numpy 向量"""
+    count = len(blob) // 4
+    return np.array(struct.unpack(f'{count}f', blob), dtype=np.float32)
+
+
 # ============================================================
 # 业务逻辑模块
 # ============================================================
 
-def save_book(concept, title, pages_data):
+def save_book(concept, title, pages_data, tags=None, embedding=None):
     """
     将绘本数据持久化到数据库和本地文件
     pages_data: [{"page_text": str, "image_path": str, "audio_path": str}, ...]
+    tags: list[str] 标签列表
+    embedding: numpy array 向量
     """
     conn = get_connection()
     try:
         conn.execute("BEGIN")
+        tags_json = json.dumps(tags, ensure_ascii=False) if tags else None
         cursor = conn.execute(
-            "INSERT INTO storybooks (title, concept) VALUES (?, ?)",
-            (title, concept)
+            "INSERT INTO storybooks (title, concept, tags) VALUES (?, ?, ?)",
+            (title, concept, tags_json)
         )
         book_id = cursor.lastrowid
 
@@ -267,6 +326,13 @@ def save_book(concept, title, pages_data):
             conn.execute(
                 "INSERT INTO storybook_pages (book_id, page_number, page_text, image_path, audio_path) VALUES (?, ?, ?, ?, ?)",
                 (book_id, i + 1, page["page_text"], page.get("image_path"), page.get("audio_path"))
+            )
+
+        if embedding is not None:
+            blob = embedding_to_blob(embedding)
+            conn.execute(
+                "INSERT INTO storybook_embeddings (book_id, embedding) VALUES (?, ?)",
+                (book_id, blob)
             )
 
         conn.commit()
@@ -329,7 +395,7 @@ def delete_book(book_id):
                 except OSError:
                     pass  # 文件删除失败，静默处理
 
-    # 再删除数据库记录（CASCADE 会自动删除 pages）
+    # 再删除数据库记录（CASCADE 会自动删除 pages 和 embeddings）
     conn = get_connection()
     try:
         conn.execute("DELETE FROM storybooks WHERE id = ?", (book_id,))
@@ -337,6 +403,132 @@ def delete_book(book_id):
     except sqlite3.Error as e:
         conn.rollback()
         raise RuntimeError(f"数据库删除失败: {e}")
+    finally:
+        conn.close()
+
+
+def search_books_by_vector(api_key, query, top_k=5):
+    """向量语义检索：返回与 query 最相似的 top_k 本绘本"""
+    query_embedding = generate_embedding(api_key, query)
+
+    conn = get_connection()
+    try:
+        rows = conn.execute("""
+            SELECT se.book_id, se.embedding
+            FROM storybook_embeddings se
+        """).fetchall()
+
+        if not rows:
+            return []
+
+        results = []
+        for row in rows:
+            book_id = row["book_id"]
+            stored_embedding = blob_to_embedding(row["embedding"])
+            # 余弦相似度
+            dot = np.dot(query_embedding, stored_embedding)
+            norm = np.linalg.norm(query_embedding) * np.linalg.norm(stored_embedding)
+            similarity = dot / norm if norm > 0 else 0.0
+            results.append((book_id, float(similarity)))
+
+        results.sort(key=lambda x: x[1], reverse=True)
+        return results[:top_k]
+    finally:
+        conn.close()
+
+
+def get_all_tags():
+    """获取所有已使用的标签（去重）"""
+    conn = get_connection()
+    try:
+        rows = conn.execute("SELECT tags FROM storybooks WHERE tags IS NOT NULL").fetchall()
+        all_tags = set()
+        for row in rows:
+            try:
+                tags = json.loads(row["tags"])
+                all_tags.update(tags)
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return sorted(all_tags)
+    finally:
+        conn.close()
+
+
+def search_books_by_tag(tag):
+    """按标签筛选绘本"""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT id, title, concept, tags, created_at FROM storybooks WHERE tags IS NOT NULL"
+        ).fetchall()
+        results = []
+        for row in rows:
+            try:
+                tags = json.loads(row["tags"])
+                if tag in tags:
+                    results.append(dict(row))
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return results
+    finally:
+        conn.close()
+
+
+def get_analytics_data():
+    """获取数据分析所需的统计信息"""
+    conn = get_connection()
+    try:
+        stats = {}
+        stats["total_books"] = conn.execute("SELECT COUNT(*) FROM storybooks").fetchone()[0]
+        stats["total_pages"] = conn.execute("SELECT COUNT(*) FROM storybook_pages").fetchone()[0]
+
+        # 图片和音频资源数
+        stats["total_images"] = conn.execute(
+            "SELECT COUNT(*) FROM storybook_pages WHERE image_path IS NOT NULL"
+        ).fetchone()[0]
+        stats["total_audios"] = conn.execute(
+            "SELECT COUNT(*) FROM storybook_pages WHERE audio_path IS NOT NULL"
+        ).fetchone()[0]
+
+        # 按概念分组统计
+        concept_rows = conn.execute(
+            "SELECT concept, COUNT(*) as cnt FROM storybooks GROUP BY concept ORDER BY cnt DESC LIMIT 10"
+        ).fetchall()
+        stats["concept_distribution"] = {row["concept"]: row["cnt"] for row in concept_rows}
+
+        # 按日期统计生成趋势
+        date_rows = conn.execute(
+            "SELECT DATE(created_at) as dt, COUNT(*) as cnt FROM storybooks GROUP BY DATE(created_at) ORDER BY dt"
+        ).fetchall()
+        stats["daily_trend"] = {row["dt"]: row["cnt"] for row in date_rows}
+
+        # 标签频率
+        tag_rows = conn.execute("SELECT tags FROM storybooks WHERE tags IS NOT NULL").fetchall()
+        tag_counter = {}
+        for row in tag_rows:
+            try:
+                tags = json.loads(row["tags"])
+                for t in tags:
+                    tag_counter[t] = tag_counter.get(t, 0) + 1
+            except (json.JSONDecodeError, TypeError):
+                pass
+        stats["tag_frequency"] = dict(sorted(tag_counter.items(), key=lambda x: x[1], reverse=True)[:15])
+
+        # 资源目录大小
+        image_size = sum(
+            os.path.getsize(os.path.join(IMAGE_DIR, f))
+            for f in os.listdir(IMAGE_DIR)
+            if os.path.isfile(os.path.join(IMAGE_DIR, f)) and f != ".gitkeep"
+        )
+        audio_size = sum(
+            os.path.getsize(os.path.join(AUDIO_DIR, f))
+            for f in os.listdir(AUDIO_DIR)
+            if os.path.isfile(os.path.join(AUDIO_DIR, f)) and f != ".gitkeep"
+        )
+        stats["image_size_mb"] = round(image_size / (1024 * 1024), 2)
+        stats["audio_size_mb"] = round(audio_size / (1024 * 1024), 2)
+
+        return stats
     finally:
         conn.close()
 
@@ -572,11 +764,13 @@ def main():
     # 侧边栏配置
     with st.sidebar:
         st.header("⚙️ 系统配置")
+        # 优先级：环境变量 > Streamlit secrets > 用户手动输入
+        default_key = DEFAULT_API_KEY or st.secrets.get("ECNU_API_KEY", "")
         api_key = st.text_input(
             "ECNU API Key",
-            value=DEFAULT_API_KEY,
+            value=default_key,
             type="password",
-            help="在 chat.ecnu.edu.cn 获取 API Key"
+            help="在 chat.ecnu.edu.cn 获取 API Key，或设置环境变量 ECNU_API_KEY"
         )
         st.markdown("---")
         st.markdown("### 📊 系统信息")
