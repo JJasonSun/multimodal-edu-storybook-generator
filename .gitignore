@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+.venv/
+
+# Database
+education.db
+
+# Generated assets
+static/images/*.png
+static/audio/*.mp3
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Course assignment docs (not part of the system)
+paper/
+*.pdf

@@ -1,0 +1,10 @@
+[project]
+name = "multimodal-edu"
+version = "0.1.0"
+description = "面向低幼通识教育的多模态教学资源自动生成与数据管理系统"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "requests>=2.28.0",
+    "streamlit>=1.28.0",
+]
