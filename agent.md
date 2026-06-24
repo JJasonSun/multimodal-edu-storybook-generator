@@ -4,7 +4,7 @@
 
 **项目名称**：面向低幼通识教育的多模态教学资源自动生成与数据管理系统
 
-**核心功能**：用户输入一个通识科学概念（如"光合作用"），系统自动调用 ECNU 大模型 API，生成包含3页的有声科普绘本（故事文本 + AI插画 + AI配音），并持久化存储到本地 SQLite 数据库。
+**核心功能**：用户输入一个通识科学概念（如"光合作用"），系统自动调用 ECNU 大模型 API，生成包含3页的有声科普绘本（故事文本 + AI插画 + AI配音），并持久化存储到本地 SQLite 数据库。系统还支持向量语义检索、自动标签分类和数据分析可视化。
 
 ## 技术栈
 
@@ -113,6 +113,26 @@ Content-Type: application/json
 
 **响应解析**：`response.content` 直接为二进制音频 → 保存到 `./static/audio/{book_id}_page{N}.mp3`
 
+### 4. 文本嵌入 (Text Embedding)
+
+```
+POST https://chat.ecnu.edu.cn/open/api/v1/embeddings
+Authorization: Bearer <API_KEY>
+Content-Type: application/json
+```
+
+**请求体**：
+```json
+{
+  "model": "ecnu-embedding-small",
+  "input": "拼接后的绘本全文"
+}
+```
+
+**响应解析**：`response.json()["data"][0]["embedding"]` → 1024 维 float 数组 → `numpy.array()` → `struct.pack()` 转 BLOB 存入 SQLite
+
+**用途**：对每本绘本的全部页面文本生成向量，用于语义检索。
+
 ## 数据库 Schema
 
 ```sql
@@ -120,6 +140,7 @@ CREATE TABLE IF NOT EXISTS storybooks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT NOT NULL,
     concept TEXT NOT NULL,
+    tags TEXT,  -- JSON 数组字符串，如 '["自然科学","动物"]'
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -132,6 +153,14 @@ CREATE TABLE IF NOT EXISTS storybook_pages (
     audio_path TEXT,
     FOREIGN KEY (book_id) REFERENCES storybooks(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS storybook_embeddings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    book_id INTEGER NOT NULL UNIQUE,
+    embedding BLOB NOT NULL,  -- 1024 维 float 向量的二进制存储
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (book_id) REFERENCES storybooks(id) ON DELETE CASCADE
+);
 ```
 
 ## 业务流水线时序
@@ -140,7 +169,7 @@ CREATE TABLE IF NOT EXISTS storybook_pages (
 用户输入概念
     │
     ▼
-[1] generate_story(concept) → {title, pages[3]}
+[1] generate_story(concept) → {title, pages[3], tags[]}
     │  调用 ecnu-plus chat/completions
     │  使用 json_schema 结构化输出
     ▼
@@ -152,13 +181,18 @@ CREATE TABLE IF NOT EXISTS storybook_pages (
     │  调用 ecnu-tts audio/speech
     │  保存二进制音频 → 本地文件
     ▼
-[4] save_book(concept, title, pages)
+[4] generate_embedding(拼接的全文)
+    │  调用 ecnu-embedding-small embeddings
+    │  获取 1024 维向量
+    ▼
+[5] save_book(concept, title, pages, tags, embedding)
     │  BEGIN TRANSACTION
-    │  INSERT INTO storybooks → 获得 book_id
+    │  INSERT INTO storybooks (含 tags) → 获得 book_id
     │  INSERT INTO storybook_pages × 3
+    │  INSERT INTO storybook_embeddings × 1
     │  COMMIT
     ▼
-前端展示 3 页绘本（图片 + 文本 + 音频播放器）
+前端展示 3 页绘本（图片 + 文本 + 音频播放器 + 标签）
 ```
 
 ## 文件目录结构
@@ -203,6 +237,9 @@ CS_edu/
 | 剧本生成 | ecnu-plus | ~500 input + ~800 output tokens ≈ 0.37 credits |
 | 插画 ×3 | ecnu-image | 30 × 3 = 90 credits |
 | 配音 ×3 | ecnu-tts | 5 × 3 = 15 credits |
-| **合计** | | **~105 credits / 次** |
+| 向量嵌入 | ecnu-embedding-small | 0.05 credits |
+| **合计** | | **~105.5 credits / 次** |
 
 在默认配额（5000 credits/天）下，约可生成 47 本绘本/天。
+
+语义检索每次额外消耗 0.05 credits（仅查询向量生成）。
