@@ -478,6 +478,70 @@ def delete_book(book_id):
         conn.close()
 
 
+def update_book_text(book_id, page_number, new_text, api_key=None):
+    """教师修正：更新页面文本，联动重新生成 TTS 音频"""
+    conn = get_connection()
+    try:
+        # 获取当前页面信息
+        row = conn.execute(
+            "SELECT id, audio_path FROM storybook_pages WHERE book_id = ? AND page_number = ?",
+            (book_id, page_number)
+        ).fetchone()
+        if not row:
+            raise ValueError(f"页面不存在: book_id={book_id}, page_number={page_number}")
+
+        page_id = row["id"]
+        old_audio = row["audio_path"]
+
+        # 更新文本
+        conn.execute(
+            "UPDATE storybook_pages SET page_text = ? WHERE id = ?",
+            (new_text, page_id)
+        )
+
+        # 同步更新 FTS5 索引
+        title_row = conn.execute("SELECT title FROM storybooks WHERE id = ?", (book_id,)).fetchone()
+        title = title_row["title"] if title_row else ""
+        conn.execute("DELETE FROM storybook_fts WHERE rowid = ?", (page_id,))
+        conn.execute(
+            "INSERT INTO storybook_fts(rowid, title, page_text) VALUES (?, ?, ?)",
+            (page_id, title, new_text)
+        )
+
+        conn.commit()
+
+        # 联动重新生成 TTS 音频
+        if api_key:
+            unique_id = f"{int(time.time())}_{uuid.uuid4().hex[:6]}"
+            new_audio_path = os.path.join(AUDIO_DIR, f"{unique_id}_page{page_number}.mp3")
+            try:
+                generate_audio(api_key, new_text, new_audio_path)
+                # 删除旧音频文件
+                if old_audio and os.path.exists(old_audio):
+                    try:
+                        os.remove(old_audio)
+                    except OSError:
+                        pass
+                # 更新数据库中的音频路径
+                conn2 = get_connection()
+                conn2.execute(
+                    "UPDATE storybook_pages SET audio_path = ? WHERE id = ?",
+                    (new_audio_path, page_id)
+                )
+                conn2.commit()
+                conn2.close()
+                return True, "文本已更新，音频已重新生成"
+            except Exception as e:
+                return True, f"文本已更新，但音频重新生成失败: {e}"
+
+        return True, "文本已更新（未提供 API Key，跳过音频重生成）"
+    except sqlite3.Error as e:
+        conn.rollback()
+        raise RuntimeError(f"更新失败: {e}")
+    finally:
+        conn.close()
+
+
 def search_books_by_vector(api_key, query, top_k=5):
     """向量语义检索：返回与 query 最相似的 top_k 本绘本"""
     query_embedding = generate_embedding(api_key, query)
@@ -644,6 +708,49 @@ def render_page_card(page, index):
 
         # 显示故事文本
         st.markdown(f"> {page['page_text']}")
+
+        # 显示音频播放器
+        audio_path = page.get("audio_path")
+        if audio_path and os.path.exists(audio_path):
+            with open(audio_path, "rb") as f:
+                st.audio(f.read(), format="audio/mp3")
+        else:
+            st.warning("配音暂未生成")
+
+        st.divider()
+
+
+def render_page_card_editable(page, index, book_id, api_key):
+    """渲染可编辑的单页绘本卡片（教师修正模式）"""
+    with st.container():
+        st.markdown(f"### 📖 第 {index} 页")
+
+        # 显示插画
+        image_path = page.get("image_path")
+        if image_path and os.path.exists(image_path):
+            st.image(image_path, width="stretch")
+        else:
+            st.warning("插画暂未生成")
+
+        # 可编辑文本框
+        new_text = st.text_area(
+            "故事文本（可编辑）",
+            value=page["page_text"],
+            height=120,
+            key=f"edit_text_{book_id}_{index}",
+        )
+
+        # 保存修改按钮
+        if new_text != page["page_text"]:
+            if st.button("💾 保存修改并重新生成配音", key=f"save_{book_id}_{index}", type="primary"):
+                with st.spinner("正在保存并重新生成配音..."):
+                    try:
+                        success, msg = update_book_text(book_id, page["page_number"], new_text, api_key)
+                        if success:
+                            st.success(msg)
+                            st.rerun()
+                    except Exception as e:
+                        st.error(f"保存失败: {e}")
 
         # 显示音频播放器
         audio_path = page.get("audio_path")
@@ -904,11 +1011,17 @@ def tab_library(api_key):
 
     st.markdown("---")
 
+    # 教师修正模式开关
+    teacher_mode = st.toggle("✏️ 教师修正模式", help="开启后可编辑故事文本，保存时自动重新生成配音")
+
     # 展示3页内容
     cols = st.columns(3)
     for i, page in enumerate(pages):
         with cols[i]:
-            render_page_card(page, page["page_number"])
+            if teacher_mode:
+                render_page_card_editable(page, page["page_number"], book_id, api_key)
+            else:
+                render_page_card(page, page["page_number"])
 
     # 删除按钮
     st.markdown("---")
