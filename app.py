@@ -5,6 +5,8 @@
 功能：一键生成包含故事剧本、AI插画、AI配音的3页有声科普绘本
 """
 
+import csv
+import io
 import json
 import os
 import re
@@ -12,6 +14,7 @@ import sqlite3
 import struct
 import time
 import uuid
+import zipfile
 from datetime import datetime
 from pathlib import Path
 
@@ -38,8 +41,11 @@ IMAGE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "
 AUDIO_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "audio")
 
 # 确保资源目录存在
-os.makedirs(IMAGE_DIR, exist_ok=True)
-os.makedirs(AUDIO_DIR, exist_ok=True)
+try:
+    os.makedirs(IMAGE_DIR, exist_ok=True)
+    os.makedirs(AUDIO_DIR, exist_ok=True)
+except OSError as e:
+    print(f"Warning: Failed to create static directories: {e}")
 
 # ============================================================
 # 数据库模块
@@ -53,8 +59,9 @@ def get_connection():
     return conn
 
 
+@st.cache_resource
 def init_database():
-    """初始化数据库表结构（幂等操作）"""
+    """初始化数据库表结构（幂等操作，仅执行一次）"""
     conn = get_connection()
     try:
         conn.executescript("""
@@ -522,7 +529,7 @@ def update_book_text(book_id, page_number, new_text, api_key=None):
 
         # 联动重新生成 TTS 音频（先生成文件，再更新 DB，最后删除旧文件）
         if api_key:
-            unique_id = f"{int(time.time())}_{uuid.uuid4().hex[:6]}"
+            unique_id = uuid.uuid4().hex[:12]
             new_audio_path = os.path.join(AUDIO_DIR, f"{unique_id}_page{page_number}.mp3")
             try:
                 generate_audio(api_key, new_text, new_audio_path)
@@ -553,7 +560,11 @@ def update_book_text(book_id, page_number, new_text, api_key=None):
 
 
 def search_books_by_vector(api_key, query, top_k=5):
-    """向量语义检索：返回与 query 最相似的 top_k 本绘本"""
+    """向量语义检索：返回与 query 最相似的 top_k 本绘本
+
+    注意：当前实现加载全部 embedding 到内存，适用于百量级数据。
+    若数据量增长至千级以上，需引入向量数据库或 ANN 索引。
+    """
     query_embedding = generate_embedding(api_key, query)
 
     conn = get_connection()
@@ -614,13 +625,17 @@ def get_recommendations(book_id, top_k=3):
         results.sort(key=lambda x: x[1], reverse=True)
         top_ids = [r[0] for r in results[:top_k]]
 
-        # 获取推荐绘本的详细信息
-        recommendations = []
-        for bid in top_ids:
-            info = get_book_info(bid)
-            if info:
-                recommendations.append(info)
-        return recommendations
+        if not top_ids:
+            return []
+
+        # 批量获取推荐绘本的详细信息（避免 N+1 查询）
+        placeholders = ",".join("?" * len(top_ids))
+        rows = conn.execute(
+            f"SELECT id, title, concept, created_at FROM storybooks WHERE id IN ({placeholders})",
+            top_ids
+        ).fetchall()
+        id_to_info = {row["id"]: dict(row) for row in rows}
+        return [id_to_info[bid] for bid in top_ids if bid in id_to_info]
     finally:
         conn.close()
 
@@ -668,8 +683,10 @@ def search_books_by_tag(tag):
     """按标签筛选绘本"""
     conn = get_connection()
     try:
+        # 预过滤：tags 列包含目标标签关键字（减少 JSON 解析量）
         rows = conn.execute(
-            "SELECT id, title, concept, tags, created_at FROM storybooks WHERE tags IS NOT NULL"
+            "SELECT id, title, concept, tags, created_at FROM storybooks WHERE tags LIKE ?",
+            (f"%{tag}%",)
         ).fetchall()
         results = []
         for row in rows:
@@ -747,32 +764,43 @@ def export_books_json():
     """导出全部绘本元数据为 JSON（不含 embedding BLOB）"""
     conn = get_connection()
     try:
-        books = conn.execute(
-            "SELECT id, title, concept, tags, created_at FROM storybooks ORDER BY created_at DESC"
-        ).fetchall()
-        result = []
-        for book in books:
-            pages = conn.execute(
-                "SELECT page_number, page_text, image_path, audio_path FROM storybook_pages WHERE book_id = ? ORDER BY page_number",
-                (book["id"],)
-            ).fetchall()
-            result.append({
-                "id": book["id"],
-                "title": book["title"],
-                "concept": book["concept"],
-                "tags": json.loads(book["tags"]) if book["tags"] else [],
-                "created_at": book["created_at"],
-                "pages": [dict(p) for p in pages],
-            })
-        return json.dumps(result, ensure_ascii=False, indent=2)
+        # 单次查询获取所有绘本和页面（避免 N+1）
+        rows = conn.execute("""
+            SELECT sb.id, sb.title, sb.concept, sb.tags, sb.created_at,
+                   sp.page_number, sp.page_text, sp.image_path, sp.audio_path
+            FROM storybooks sb
+            LEFT JOIN storybook_pages sp ON sp.book_id = sb.id
+            ORDER BY sb.created_at DESC, sp.page_number
+        """).fetchall()
+
+        # 按绘本分组
+        books_map = {}
+        for row in rows:
+            bid = row["id"]
+            if bid not in books_map:
+                books_map[bid] = {
+                    "id": bid,
+                    "title": row["title"],
+                    "concept": row["concept"],
+                    "tags": json.loads(row["tags"]) if row["tags"] else [],
+                    "created_at": row["created_at"],
+                    "pages": [],
+                }
+            if row["page_number"] is not None:
+                books_map[bid]["pages"].append({
+                    "page_number": row["page_number"],
+                    "page_text": row["page_text"],
+                    "image_path": row["image_path"],
+                    "audio_path": row["audio_path"],
+                })
+
+        return json.dumps(list(books_map.values()), ensure_ascii=False, indent=2)
     finally:
         conn.close()
 
 
 def export_books_csv():
     """导出全部绘本元数据为 CSV"""
-    import csv
-    import io
     conn = get_connection()
     try:
         books = conn.execute(
@@ -790,14 +818,24 @@ def export_books_csv():
 
 def export_book_zip(book_id):
     """导出单本绘本为标准化课件资产包（zip）"""
-    import io
-    import zipfile
+    conn = get_connection()
+    try:
+        book_row = conn.execute(
+            "SELECT id, title, concept, tags, created_at FROM storybooks WHERE id = ?",
+            (book_id,)
+        ).fetchone()
+        if not book_row:
+            return None
+        book_info = dict(book_row)
 
-    book_info = get_book_info(book_id)
-    if not book_info:
-        return None
+        pages = conn.execute(
+            "SELECT page_number, page_text, image_path, audio_path FROM storybook_pages WHERE book_id = ? ORDER BY page_number",
+            (book_id,)
+        ).fetchall()
+        pages = [dict(p) for p in pages]
+    finally:
+        conn.close()
 
-    pages = get_book_pages(book_id)
     tags = []
     if book_info.get("tags"):
         try:
@@ -838,29 +876,32 @@ def export_book_zip(book_id):
 # Streamlit 前端
 # ============================================================
 
+def _render_image(page):
+    """渲染页面插画"""
+    image_path = page.get("image_path")
+    if image_path and os.path.exists(image_path):
+        st.image(image_path, width="stretch")
+    else:
+        st.warning("插画暂未生成")
+
+
+def _render_audio(page):
+    """渲染页面音频播放器"""
+    audio_path = page.get("audio_path")
+    if audio_path and os.path.exists(audio_path):
+        with open(audio_path, "rb") as f:
+            st.audio(f.read(), format="audio/mp3")
+    else:
+        st.warning("配音暂未生成")
+
+
 def render_page_card(page, index):
     """渲染单页绘本卡片"""
     with st.container():
         st.markdown(f"### 📖 第 {index} 页")
-
-        # 显示插画
-        image_path = page.get("image_path")
-        if image_path and os.path.exists(image_path):
-            st.image(image_path, width="stretch")
-        else:
-            st.warning("插画暂未生成")
-
-        # 显示故事文本
+        _render_image(page)
         st.markdown(f"> {page['page_text']}")
-
-        # 显示音频播放器
-        audio_path = page.get("audio_path")
-        if audio_path and os.path.exists(audio_path):
-            with open(audio_path, "rb") as f:
-                st.audio(f.read(), format="audio/mp3")
-        else:
-            st.warning("配音暂未生成")
-
+        _render_audio(page)
         st.divider()
 
 
@@ -868,13 +909,7 @@ def render_page_card_editable(page, index, book_id, api_key):
     """渲染可编辑的单页绘本卡片（教师修正模式）"""
     with st.container():
         st.markdown(f"### 📖 第 {index} 页")
-
-        # 显示插画
-        image_path = page.get("image_path")
-        if image_path and os.path.exists(image_path):
-            st.image(image_path, width="stretch")
-        else:
-            st.warning("插画暂未生成")
+        _render_image(page)
 
         # 可编辑文本框
         new_text = st.text_area(
@@ -896,14 +931,7 @@ def render_page_card_editable(page, index, book_id, api_key):
                     except Exception as e:
                         st.error(f"保存失败: {e}")
 
-        # 显示音频播放器
-        audio_path = page.get("audio_path")
-        if audio_path and os.path.exists(audio_path):
-            with open(audio_path, "rb") as f:
-                st.audio(f.read(), format="audio/mp3")
-        else:
-            st.warning("配音暂未生成")
-
+        _render_audio(page)
         st.divider()
 
 
@@ -925,6 +953,10 @@ def tab_creation_center(api_key):
     if generate_clicked:
         if not concept.strip():
             st.warning("请先输入一个科学概念！")
+            return
+
+        if len(concept.strip()) > 200:
+            st.warning("科学概念过长，请精简至 200 字以内")
             return
 
         if not api_key:
@@ -975,7 +1007,7 @@ def tab_creation_center(api_key):
                     continue
 
                 # 用时间戳+随机数生成唯一文件名
-                unique_id = f"{int(time.time())}_{uuid.uuid4().hex[:6]}"
+                unique_id = uuid.uuid4().hex[:12]
                 image_path = os.path.join(IMAGE_DIR, f"{unique_id}_page{i+1}.png")
 
                 try:
@@ -995,7 +1027,7 @@ def tab_creation_center(api_key):
             for i in range(3):
                 st.write(f"🔊 正在生成第 {i+1} 页配音...")
                 page_text = pages[i]["page_text"]
-                unique_id = f"{int(time.time())}_{uuid.uuid4().hex[:6]}"
+                unique_id = uuid.uuid4().hex[:12]
                 audio_path = os.path.join(AUDIO_DIR, f"{unique_id}_page{i+1}.mp3")
 
                 try:
@@ -1292,6 +1324,8 @@ def _parse_api_error(error):
     """解析 API 错误信息"""
     try:
         resp = error.response
+        if resp is None:
+            return str(error)
         detail = resp.json().get("detail", "")
         if isinstance(detail, list):
             return "; ".join(d.get("msg", str(d)) for d in detail)
@@ -1300,8 +1334,13 @@ def _parse_api_error(error):
         return str(error)
 
 
+@st.cache_data(ttl=60)
 def _check_model(api_key, model, endpoint="chat"):
-    """检测单个模型是否可用，返回 (状态, 延迟ms)"""
+    """检测单个模型是否可用，返回 (状态, 延迟ms)，结果缓存 60 秒
+
+    注意：health check 会发送真实 API 请求，消耗少量配额（约 0.01 credits/次）。
+    缓存 60 秒可避免频繁检测。
+    """
     headers = get_headers(api_key)
     try:
         start = time.time()
