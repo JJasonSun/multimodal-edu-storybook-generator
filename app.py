@@ -86,6 +86,33 @@ def init_database():
         """)
         conn.commit()
 
+        # B-Tree 索引：优化 concept、created_at、book_id+page_number 查询
+        conn.executescript("""
+            CREATE INDEX IF NOT EXISTS idx_storybooks_concept ON storybooks(concept);
+            CREATE INDEX IF NOT EXISTS idx_storybooks_created_at ON storybooks(created_at);
+            CREATE INDEX IF NOT EXISTS idx_pages_book_id ON storybook_pages(book_id, page_number);
+        """)
+        conn.commit()
+
+        # FTS5 全文检索虚拟表：支持标题和页面文本的关键字检索
+        conn.execute("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS storybook_fts USING fts5(
+                title, page_text
+            )
+        """)
+        conn.commit()
+
+        # 仅在 FTS 表为空时从已有数据重建索引
+        fts_count = conn.execute("SELECT count(*) FROM storybook_fts").fetchone()[0]
+        if fts_count == 0:
+            conn.execute("""
+                INSERT INTO storybook_fts(rowid, title, page_text)
+                    SELECT sp.id, sb.title, sp.page_text
+                    FROM storybook_pages sp
+                    JOIN storybooks sb ON sb.id = sp.book_id
+            """)
+            conn.commit()
+
         # 兼容旧数据库：为 storybooks 表添加 tags 列（如果不存在）
         try:
             conn.execute("ALTER TABLE storybooks ADD COLUMN tags TEXT")
@@ -350,17 +377,26 @@ def save_book(concept, title, pages_data, tags=None, embedding=None):
         )
         book_id = cursor.lastrowid
 
+        page_rowids = []
         for i, page in enumerate(pages_data):
-            conn.execute(
+            cursor = conn.execute(
                 "INSERT INTO storybook_pages (book_id, page_number, page_text, image_path, audio_path) VALUES (?, ?, ?, ?, ?)",
                 (book_id, i + 1, page["page_text"], page.get("image_path"), page.get("audio_path"))
             )
+            page_rowids.append(cursor.lastrowid)
 
         if embedding is not None:
             blob = embedding_to_blob(embedding)
             conn.execute(
                 "INSERT INTO storybook_embeddings (book_id, embedding) VALUES (?, ?)",
                 (book_id, blob)
+            )
+
+        # 同步 FTS5 索引
+        for i, rowid in enumerate(page_rowids):
+            conn.execute(
+                "INSERT INTO storybook_fts(rowid, title, page_text) VALUES (?, ?, ?)",
+                (rowid, title, pages_data[i]["page_text"])
             )
 
         conn.commit()
@@ -423,9 +459,16 @@ def delete_book(book_id):
                 except OSError:
                     pass  # 文件删除失败，静默处理
 
-    # 再删除数据库记录（CASCADE 会自动删除 pages 和 embeddings）
+    # 再删除数据库记录
     conn = get_connection()
     try:
+        # 先清理 FTS5 索引（在 CASCADE 删除 pages 之前）
+        page_ids = [row["id"] for row in conn.execute(
+            "SELECT id FROM storybook_pages WHERE book_id = ?", (book_id,)
+        ).fetchall()]
+        for pid in page_ids:
+            conn.execute("DELETE FROM storybook_fts WHERE rowid = ?", (pid,))
+
         conn.execute("DELETE FROM storybooks WHERE id = ?", (book_id,))
         conn.commit()
     except sqlite3.Error as e:
@@ -461,6 +504,28 @@ def search_books_by_vector(api_key, query, top_k=5):
 
         results.sort(key=lambda x: x[1], reverse=True)
         return results[:top_k]
+    finally:
+        conn.close()
+
+
+def search_books_by_fts(query, top_k=5):
+    """FTS5 全文关键字检索：返回匹配的绘本（去重）"""
+    # 将用户输入包装为短语查询，避免 FTS5 语法注入
+    safe_query = '"' + query.replace('"', '""') + '"'
+    conn = get_connection()
+    try:
+        rows = conn.execute("""
+            SELECT DISTINCT sb.id, sb.title, sb.concept, sb.created_at
+            FROM storybook_fts fts
+            JOIN storybook_pages sp ON sp.id = fts.rowid
+            JOIN storybooks sb ON sb.id = sp.book_id
+            WHERE storybook_fts MATCH ?
+            ORDER BY rank
+            LIMIT ?
+        """, (safe_query, top_k)).fetchall()
+        return [dict(row) for row in rows]
+    except sqlite3.OperationalError:
+        return []  # 查询语法错误时返回空
     finally:
         conn.close()
 
@@ -737,12 +802,23 @@ def tab_library(api_key):
         return
 
     # ---- 搜索与筛选区 ----
-    col_search, col_tag = st.columns([2, 1])
+    col_mode, col_search, col_tag = st.columns([1, 2, 1])
+
+    with col_mode:
+        search_mode = st.selectbox(
+            "检索模式",
+            options=["语义检索", "关键字检索"],
+            label_visibility="collapsed",
+        )
 
     with col_search:
+        search_placeholder = {
+            "语义检索": "输入自然语言描述，如：关于太阳系的故事",
+            "关键字检索": "输入关键字，如：恐龙、海洋",
+        }[search_mode]
         search_query = st.text_input(
-            "🔍 语义搜索",
-            placeholder="输入自然语言描述，如：关于太阳系的故事",
+            "🔍 搜索",
+            placeholder=search_placeholder,
             label_visibility="collapsed",
         )
 
@@ -756,23 +832,36 @@ def tab_library(api_key):
 
     # ---- 搜索逻辑 ----
     filtered_books = None
-    if search_query.strip() and api_key:
-        with st.spinner("正在语义检索..."):
-            try:
-                results = search_books_by_vector(api_key, search_query.strip())
+    if search_query.strip():
+        if search_mode == "语义检索":
+            if api_key:
+                with st.spinner("正在语义检索..."):
+                    try:
+                        results = search_books_by_vector(api_key, search_query.strip())
+                        if results:
+                            book_ids = [r[0] for r in results]
+                            filtered_books = []
+                            for bid in book_ids:
+                                info = get_book_info(bid)
+                                if info:
+                                    filtered_books.append(info)
+                            st.caption(f"语义检索找到 {len(filtered_books)} 本相关绘本")
+                        else:
+                            st.info("未找到相关绘本")
+                            filtered_books = []
+                    except Exception as e:
+                        st.warning(f"语义检索失败: {e}，回退到列表模式")
+            else:
+                st.warning("语义检索需要 API Key，请在左侧边栏配置")
+        else:  # 关键字检索
+            with st.spinner("正在关键字检索..."):
+                results = search_books_by_fts(search_query.strip())
                 if results:
-                    book_ids = [r[0] for r in results]
-                    filtered_books = []
-                    for bid in book_ids:
-                        info = get_book_info(bid)
-                        if info:
-                            filtered_books.append(info)
-                    st.caption(f"找到 {len(filtered_books)} 本相关绘本")
+                    filtered_books = results
+                    st.caption(f"关键字检索找到 {len(filtered_books)} 本相关绘本")
                 else:
-                    st.info("未找到相关绘本")
+                    st.info("未找到匹配的绘本")
                     filtered_books = []
-            except Exception as e:
-                st.warning(f"语义检索失败: {e}，回退到列表模式")
 
     elif selected_tag != "全部标签":
         filtered_books = search_books_by_tag(selected_tag)

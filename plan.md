@@ -6,8 +6,9 @@
 ## 交付物
 1. `app.py` — 完整的 Streamlit 主程序
 2. `README.md` — 系统运行说明文档
-3. `plan.md` — 本计划文件
-4. `agent.md` — 架构与 API 调用规范
+3. `Plan.md` — 本计划文件
+4. `AGENTS.md` — Agent 工作指南
+5. `paper/论文大纲.md` — Demo 论文结构与内容规划
 
 ## 技术架构
 
@@ -85,7 +86,7 @@ Base URL: `https://chat.ecnu.edu.cn/open/api/v1`
 app.py
 ├── 配置常量 (API_BASE_URL, API_KEY, 模型名, 目录路径)
 ├── 数据库模块
-│   ├── init_database()              — 建表（IF NOT EXISTS），含 embeddings 表
+│   ├── init_database()              — 建表（IF NOT EXISTS），含 FTS5 虚拟表和索引
 │   └── get_connection()             — 获取连接，启用外键
 ├── API 调用模块
 │   ├── generate_story(concept)      — 调用 ecnu-plus，返回 JSON（含 tags）
@@ -93,18 +94,24 @@ app.py
 │   ├── generate_audio(text)         — 调用 ecnu-tts，返回音频 bytes
 │   └── generate_embedding(text)     — 调用 ecnu-embedding-small，返回 1024 维向量
 ├── 业务逻辑模块
-│   ├── save_book(concept, title, pages, tags, embedding) — 事务写入 3 张表
+│   ├── save_book(concept, title, pages, tags, embedding) — 事务写入 3 张表 + FTS5
+│   ├── update_book_text(book_id, page_number, new_text)  — 教师修正文本 + 联动 TTS
 │   ├── get_all_books()              — 查询所有绘本
 │   ├── get_book_pages(book_id)      — 查询指定绘本的页面
 │   ├── delete_book(book_id)         — 删除 DB 记录 + 本地文件
 │   ├── search_books_by_vector(query, top_k) — 向量语义检索
+│   ├── search_books_by_fts(query)   — FTS5 全文关键字检索
 │   ├── search_books_by_tag(tag)     — 标签筛选
-│   └── get_analytics_data()         — 统计分析数据
+│   ├── get_recommendations(book_id, top_k) — 自适应拓展推荐
+│   ├── get_analytics_data()         — 统计分析数据
+│   ├── export_books_json()          — JSON 元数据导出
+│   ├── export_books_csv()           — CSV 元数据导出
+│   └── export_book_zip(book_id)     — 标准化课件资产包导出
 ├── 前端模块
-│   ├── render_page_card()           — 渲染单页绘本卡片
+│   ├── render_page_card()           — 渲染单页绘本卡片（含教师修正模式）
 │   ├── tab_creation_center()        — Tab 1: 创作中心
-│   ├── tab_library()                — Tab 2: 绘本馆（含搜索+标签筛选）
-│   └── tab_analytics()              — Tab 3: 数据分析中心
+│   ├── tab_library()                — Tab 2: 绘本馆（混合搜索+推荐+修正）
+│   └── tab_analytics()              — Tab 3: 数据分析中心（含数据导出）
 └── main()                           — 入口，侧边栏 + tabs
 ```
 
@@ -116,18 +123,44 @@ app.py
 3. ✅ 编写 `README.md`
 4. ✅ uv 环境管理 + git 版本控制
 
-### Phase 2: 功能增强（待实施）
-1. 新增 `generate_embedding()` 函数，调用 ecnu-embedding-small
-2. 新增 `storybook_embeddings` 表，更新 `init_database()`
-3. 剧本生成 prompt 增加 tags 输出要求，更新 JSON schema
-4. 更新 `save_book()` 写入 tags 和 embedding
-5. 实现 `search_books_by_vector()` 向量语义检索（余弦相似度）
-6. 实现 `search_books_by_tag()` 标签筛选
-7. 实现 `get_analytics_data()` 统计分析
-8. 新增 Tab 3 数据分析面板
-9. 更新 Tab 2 绘本馆，增加搜索框和标签筛选
-10. 更新 `pyproject.toml` 新增 `numpy` 依赖
-11. 更新 `README.md` 文档
+### Phase 2: 功能增强（已完成）
+1. ✅ 新增 `generate_embedding()` 函数，调用 ecnu-embedding-small
+2. ✅ 新增 `storybook_embeddings` 表，更新 `init_database()`
+3. ✅ 剧本生成 prompt 增加 tags 输出要求，更新 JSON schema
+4. ✅ 更新 `save_book()` 写入 tags 和 embedding
+5. ✅ 实现 `search_books_by_vector()` 向量语义检索（余弦相似度）
+6. ✅ 实现 `search_books_by_tag()` 标签筛选
+7. ✅ 实现 `get_analytics_data()` 统计分析
+8. ✅ 新增 Tab 3 数据分析面板
+9. ✅ 更新 Tab 2 绘本馆，增加搜索框和标签筛选
+10. ✅ 更新 `pyproject.toml` 新增 `numpy` 依赖
+11. ✅ 更新 `README.md` 文档
+
+### Phase 3: 系统功能与学术深度优化（实施中）
+
+> 每个优化点实现前更新本文件，实现后单独提交。
+
+#### 3.1 查询优化与混合检索（已完成）
+- ✅ **B-Tree 索引**：为 `concept`、`created_at`、`book_id+page_number` 添加索引
+- ✅ **FTS5 全文检索**：创建 `storybook_fts` 虚拟表，支持关键字精准检索
+- ✅ **混合检索**：搜索框支持"语义检索"与"关键字检索"切换
+- ✅ **FTS5 同步**：`save_book()` 和 `delete_book()` 自动维护 FTS 索引
+- 论文覆盖：查询处理与查询优化、信息检索系统、半结构化数据管理
+
+#### 3.2 人在环路数据治理
+- **教师修正模式**：Tab 2 浏览绘本时增加开关，文本框变为可编辑
+- **联动重构**：保存修改后自动重新调用 ecnu-tts 刷新该页音频
+- 论文覆盖：人在环路数据管理（Human-in-the-loop）
+
+#### 3.3 自适应拓展推荐
+- **向量相似度推荐**：基于 1024 维向量余弦相似度，推荐相关绘本
+- **前端包装**：展示为"拓展学习推荐（Extended Learning Navigation）"
+- 论文覆盖：推荐系统、数据驱动的AI系统、自适应学习路径规划
+
+#### 3.4 数据要素合规导出
+- **标准化资产包**：zip 打包（JSON 描述符 + 图片 PNG + 音频 MP3）
+- **纯元数据导出**：支持 JSON/CSV 格式的绘本元数据导出
+- 论文覆盖：数据要素支撑技术、教学资源资产化与可移植性
 
 ## 验证方式
 

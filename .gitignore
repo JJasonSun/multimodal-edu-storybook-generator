@@ -26,6 +26,9 @@ Thumbs.db
 .vscode/
 .idea/
 
+# MiMoCode
+.mimocode/
+
 # Course assignment docs (not part of the system)
 paper/
 *.pdf
