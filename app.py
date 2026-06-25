@@ -572,6 +572,49 @@ def search_books_by_vector(api_key, query, top_k=5):
         conn.close()
 
 
+def get_recommendations(book_id, top_k=3):
+    """自适应拓展推荐：基于向量余弦相似度推荐相关绘本"""
+    conn = get_connection()
+    try:
+        # 获取当前绘本的 embedding
+        target_row = conn.execute(
+            "SELECT embedding FROM storybook_embeddings WHERE book_id = ?", (book_id,)
+        ).fetchone()
+        if not target_row:
+            return []
+
+        target_embedding = blob_to_embedding(target_row["embedding"])
+
+        # 获取所有其他绘本的 embedding
+        rows = conn.execute(
+            "SELECT book_id, embedding FROM storybook_embeddings WHERE book_id != ?", (book_id,)
+        ).fetchall()
+
+        if not rows:
+            return []
+
+        results = []
+        for row in rows:
+            other_embedding = blob_to_embedding(row["embedding"])
+            dot = np.dot(target_embedding, other_embedding)
+            norm = np.linalg.norm(target_embedding) * np.linalg.norm(other_embedding)
+            similarity = dot / norm if norm > 0 else 0.0
+            results.append((row["book_id"], float(similarity)))
+
+        results.sort(key=lambda x: x[1], reverse=True)
+        top_ids = [r[0] for r in results[:top_k]]
+
+        # 获取推荐绘本的详细信息
+        recommendations = []
+        for bid in top_ids:
+            info = get_book_info(bid)
+            if info:
+                recommendations.append(info)
+        return recommendations
+    finally:
+        conn.close()
+
+
 def search_books_by_fts(query, top_k=5):
     """FTS5 全文关键字检索：返回匹配的绘本（去重）"""
     # 将用户输入包装为短语查询，避免 FTS5 语法注入
@@ -981,14 +1024,18 @@ def tab_library(api_key):
         st.info("📭 没有匹配的绘本")
         return
 
-    # 绘本选择
+    # 绘本选择（支持从推荐跳转）
     book_options = {f"{b['title']}（{b['concept']}）— {b['created_at']}": b['id'] for b in display_books}
     selected_label = st.selectbox("选择一本绘本", options=list(book_options.keys()))
 
     if not selected_label:
         return
 
-    book_id = book_options[selected_label]
+    # 支持从推荐按钮跳转
+    if "selected_book_id" in st.session_state:
+        book_id = st.session_state.pop("selected_book_id")
+    else:
+        book_id = book_options[selected_label]
     book_info = get_book_info(book_id)
     pages = get_book_pages(book_id)
 
@@ -1022,6 +1069,22 @@ def tab_library(api_key):
                 render_page_card_editable(page, page["page_number"], book_id, api_key)
             else:
                 render_page_card(page, page["page_number"])
+
+    # 拓展学习推荐
+    st.markdown("---")
+    st.markdown("#### 🔗 拓展学习推荐")
+    recommendations = get_recommendations(book_id)
+    if recommendations:
+        rec_cols = st.columns(len(recommendations))
+        for i, rec in enumerate(recommendations):
+            with rec_cols[i]:
+                st.markdown(f"**{rec['title']}**")
+                st.caption(f"概念：{rec['concept']}")
+                if st.button("查看", key=f"rec_{rec['id']}", use_container_width=True):
+                    st.session_state["selected_book_id"] = rec["id"]
+                    st.rerun()
+    else:
+        st.caption("暂无相关绘本推荐")
 
     # 删除按钮
     st.markdown("---")
