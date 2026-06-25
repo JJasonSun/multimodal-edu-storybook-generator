@@ -288,12 +288,14 @@ def generate_image(api_key, prompt, save_path):
 
     image_url = response.json()["data"][0]["url"]
 
-    # 下载图片
+    # 下载图片（原子写入：先写临时文件，成功后重命名）
     img_response = requests.get(image_url, timeout=60)
     img_response.raise_for_status()
 
-    with open(save_path, "wb") as f:
+    tmp_path = save_path + ".tmp"
+    with open(tmp_path, "wb") as f:
         f.write(img_response.content)
+    os.replace(tmp_path, save_path)
 
     return save_path
 
@@ -320,8 +322,10 @@ def generate_audio(api_key, text, save_path):
     response = requests.post(url, headers=get_headers(api_key), json=payload, timeout=120)
     response.raise_for_status()
 
-    with open(save_path, "wb") as f:
+    tmp_path = save_path + ".tmp"
+    with open(tmp_path, "wb") as f:
         f.write(response.content)
+    os.replace(tmp_path, save_path)
 
     return save_path
 
@@ -448,29 +452,37 @@ def get_book_info(book_id):
 
 def delete_book(book_id):
     """删除绘本（数据库记录 + 本地文件）"""
-    # 先删除本地文件
-    pages = get_book_pages(book_id)
-    for page in pages:
-        for path_key in ("image_path", "audio_path"):
-            file_path = page.get(path_key)
-            if file_path and os.path.exists(file_path):
-                try:
-                    os.remove(file_path)
-                except OSError:
-                    pass  # 文件删除失败，静默处理
-
-    # 再删除数据库记录
     conn = get_connection()
     try:
-        # 先清理 FTS5 索引（在 CASCADE 删除 pages 之前）
+        # 先获取文件路径（用于提交后删除）
+        pages = conn.execute(
+            "SELECT image_path, audio_path FROM storybook_pages WHERE book_id = ?", (book_id,)
+        ).fetchall()
+        file_paths = []
+        for page in pages:
+            for path_key in ("image_path", "audio_path"):
+                fp = page[path_key]
+                if fp:
+                    file_paths.append(fp)
+
+        # 清理 FTS5 索引（在 CASCADE 删除 pages 之前）
         page_ids = [row["id"] for row in conn.execute(
             "SELECT id FROM storybook_pages WHERE book_id = ?", (book_id,)
         ).fetchall()]
         for pid in page_ids:
             conn.execute("DELETE FROM storybook_fts WHERE rowid = ?", (pid,))
 
+        # 删除数据库记录
         conn.execute("DELETE FROM storybooks WHERE id = ?", (book_id,))
         conn.commit()
+
+        # 仅在 DB 删除成功后删除本地文件
+        for fp in file_paths:
+            if os.path.exists(fp):
+                try:
+                    os.remove(fp)
+                except OSError:
+                    pass
     except sqlite3.Error as e:
         conn.rollback()
         raise RuntimeError(f"数据库删除失败: {e}")
@@ -482,7 +494,6 @@ def update_book_text(book_id, page_number, new_text, api_key=None):
     """教师修正：更新页面文本，联动重新生成 TTS 音频"""
     conn = get_connection()
     try:
-        # 获取当前页面信息
         row = conn.execute(
             "SELECT id, audio_path FROM storybook_pages WHERE book_id = ? AND page_number = ?",
             (book_id, page_number)
@@ -493,13 +504,11 @@ def update_book_text(book_id, page_number, new_text, api_key=None):
         page_id = row["id"]
         old_audio = row["audio_path"]
 
-        # 更新文本
+        # 更新文本 + FTS5 索引
         conn.execute(
             "UPDATE storybook_pages SET page_text = ? WHERE id = ?",
             (new_text, page_id)
         )
-
-        # 同步更新 FTS5 索引
         title_row = conn.execute("SELECT title FROM storybooks WHERE id = ?", (book_id,)).fetchone()
         title = title_row["title"] if title_row else ""
         conn.execute("DELETE FROM storybook_fts WHERE rowid = ?", (page_id,))
@@ -508,33 +517,34 @@ def update_book_text(book_id, page_number, new_text, api_key=None):
             (page_id, title, new_text)
         )
 
-        conn.commit()
+        new_audio_path = None
+        audio_msg = "（未提供 API Key，跳过音频重生成）"
 
-        # 联动重新生成 TTS 音频
+        # 联动重新生成 TTS 音频（先生成文件，再更新 DB，最后删除旧文件）
         if api_key:
             unique_id = f"{int(time.time())}_{uuid.uuid4().hex[:6]}"
             new_audio_path = os.path.join(AUDIO_DIR, f"{unique_id}_page{page_number}.mp3")
             try:
                 generate_audio(api_key, new_text, new_audio_path)
-                # 删除旧音频文件
-                if old_audio and os.path.exists(old_audio):
-                    try:
-                        os.remove(old_audio)
-                    except OSError:
-                        pass
-                # 更新数据库中的音频路径
-                conn2 = get_connection()
-                conn2.execute(
+                conn.execute(
                     "UPDATE storybook_pages SET audio_path = ? WHERE id = ?",
                     (new_audio_path, page_id)
                 )
-                conn2.commit()
-                conn2.close()
-                return True, "文本已更新，音频已重新生成"
+                audio_msg = "音频已重新生成"
             except Exception as e:
-                return True, f"文本已更新，但音频重新生成失败: {e}"
+                new_audio_path = None
+                audio_msg = f"音频重新生成失败: {e}"
 
-        return True, "文本已更新（未提供 API Key，跳过音频重生成）"
+        conn.commit()
+
+        # 仅在成功提交后删除旧音频文件
+        if new_audio_path and old_audio and os.path.exists(old_audio):
+            try:
+                os.remove(old_audio)
+            except OSError:
+                pass
+
+        return True, f"文本已更新，{audio_msg}"
     except sqlite3.Error as e:
         conn.rollback()
         raise RuntimeError(f"更新失败: {e}")
