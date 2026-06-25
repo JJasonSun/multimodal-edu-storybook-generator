@@ -733,6 +733,97 @@ def get_analytics_data():
         conn.close()
 
 
+def export_books_json():
+    """导出全部绘本元数据为 JSON（不含 embedding BLOB）"""
+    conn = get_connection()
+    try:
+        books = conn.execute(
+            "SELECT id, title, concept, tags, created_at FROM storybooks ORDER BY created_at DESC"
+        ).fetchall()
+        result = []
+        for book in books:
+            pages = conn.execute(
+                "SELECT page_number, page_text, image_path, audio_path FROM storybook_pages WHERE book_id = ? ORDER BY page_number",
+                (book["id"],)
+            ).fetchall()
+            result.append({
+                "id": book["id"],
+                "title": book["title"],
+                "concept": book["concept"],
+                "tags": json.loads(book["tags"]) if book["tags"] else [],
+                "created_at": book["created_at"],
+                "pages": [dict(p) for p in pages],
+            })
+        return json.dumps(result, ensure_ascii=False, indent=2)
+    finally:
+        conn.close()
+
+
+def export_books_csv():
+    """导出全部绘本元数据为 CSV"""
+    import csv
+    import io
+    conn = get_connection()
+    try:
+        books = conn.execute(
+            "SELECT id, title, concept, tags, created_at FROM storybooks ORDER BY created_at DESC"
+        ).fetchall()
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["id", "title", "concept", "tags", "created_at"])
+        for book in books:
+            writer.writerow([book["id"], book["title"], book["concept"], book["tags"], book["created_at"]])
+        return output.getvalue()
+    finally:
+        conn.close()
+
+
+def export_book_zip(book_id):
+    """导出单本绘本为标准化课件资产包（zip）"""
+    import io
+    import zipfile
+
+    book_info = get_book_info(book_id)
+    if not book_info:
+        return None
+
+    pages = get_book_pages(book_id)
+    tags = []
+    if book_info.get("tags"):
+        try:
+            tags = json.loads(book_info["tags"])
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    # 构建 JSON 描述符
+    descriptor = {
+        "id": book_info["id"],
+        "title": book_info["title"],
+        "concept": book_info["concept"],
+        "tags": tags,
+        "created_at": book_info["created_at"],
+        "pages": [],
+    }
+    for page in pages:
+        descriptor["pages"].append({
+            "page_number": page["page_number"],
+            "page_text": page["page_text"],
+        })
+
+    # 创建 zip 包
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("descriptor.json", json.dumps(descriptor, ensure_ascii=False, indent=2))
+        for page in pages:
+            if page.get("image_path") and os.path.exists(page["image_path"]):
+                zf.write(page["image_path"], f"images/page{page['page_number']}.png")
+            if page.get("audio_path") and os.path.exists(page["audio_path"]):
+                zf.write(page["audio_path"], f"audio/page{page['page_number']}.mp3")
+
+    buf.seek(0)
+    return buf
+
+
 # ============================================================
 # Streamlit 前端
 # ============================================================
@@ -1140,6 +1231,51 @@ def tab_analytics():
     if stats["tag_frequency"]:
         st.markdown("#### 🏷️ 标签频率 Top 15")
         st.bar_chart(stats["tag_frequency"])
+
+    # 数据导出
+    st.markdown("---")
+    st.markdown("#### 📦 数据导出")
+    col_json, col_csv, col_zip = st.columns(3)
+
+    with col_json:
+        json_data = export_books_json()
+        st.download_button(
+            label="📄 导出 JSON",
+            data=json_data,
+            file_name="storybooks.json",
+            mime="application/json",
+            use_container_width=True,
+        )
+
+    with col_csv:
+        csv_data = export_books_csv()
+        st.download_button(
+            label="📊 导出 CSV",
+            data=csv_data,
+            file_name="storybooks.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+    with col_zip:
+        books = get_all_books()
+        if books:
+            selected_export = st.selectbox(
+                "选择绘本导出资产包",
+                options=[f"{b['title']}（{b['concept']}）" for b in books],
+                key="export_zip_select",
+            )
+            if selected_export:
+                idx = [f"{b['title']}（{b['concept']}）" for b in books].index(selected_export)
+                zip_buf = export_book_zip(books[idx]["id"])
+                if zip_buf:
+                    st.download_button(
+                        label="📦 导出课件资产包 (ZIP)",
+                        data=zip_buf,
+                        file_name=f"storybook_{books[idx]['id']}.zip",
+                        mime="application/zip",
+                        use_container_width=True,
+                    )
 
 
 def _parse_api_error(error):
